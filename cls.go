@@ -5,10 +5,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,9 +23,11 @@ import (
 // 不影响应用本身。因此分发给普通用户的包默认只写本地日志。
 
 const (
-	clsHost        = "cls.tencentcloudapi.com"
-	clsService     = "cls"
-	clsContentType = "application/x-protobuf"
+	clsHost    = "cls.tencentcloudapi.com"
+	clsService = "cls"
+	// 文档明确：UploadLog 仅支持 application/octet-stream，
+	// 用 application/x-protobuf 会被网关以 UnsupportedProtocol 拒绝。
+	clsContentType = "application/octet-stream"
 	clsMaxPending  = 500 // 本地积压上限，超过丢弃最早日志
 )
 
@@ -113,21 +117,45 @@ func (u *clsUploader) flush() {
 	defer response.Body.Close()
 	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 
-	switch {
-	case response.StatusCode == http.StatusOK:
-		// 上传成功
-	case response.StatusCode >= 400 && response.StatusCode < 500:
-		// 4xx 属于配置/密钥问题，重试没有意义，永久禁用
+	// UploadLog 失败时也可能返回 HTTP 200（错误在响应体 JSON 里），必须解析判断。
+	if response.StatusCode == http.StatusOK && !bytes.Contains(responseBody, []byte(`"Error"`)) {
+		return // 上传成功
+	}
+
+	var errorPayload struct {
+		Response struct {
+			Error struct {
+				Code    string `json:"Code"`
+				Message string `json:"Message"`
+			} `json:"Error"`
+		} `json:"Response"`
+	}
+	_ = json.Unmarshal(responseBody, &errorPayload)
+	code := errorPayload.Response.Error.Code
+	message := errorPayload.Response.Error.Message
+	if code == "" && response.StatusCode != http.StatusOK {
+		code = "HTTP " + strconv.Itoa(response.StatusCode)
+		message = truncateForLog(string(responseBody), 300)
+	}
+
+	// 密钥/配置类错误重试无意义，永久禁用；限流/服务端错误稍后重试。
+	fatal := strings.HasPrefix(code, "AuthFailure") ||
+		strings.HasPrefix(code, "ResourceNotFound") ||
+		strings.HasPrefix(code, "InvalidParameter") ||
+		strings.HasPrefix(code, "UnsupportedProtocol") ||
+		strings.HasPrefix(code, "UnauthorizedOperation") ||
+		(response.StatusCode >= 400 && response.StatusCode < 500)
+	if fatal {
 		logEvent("error", "cls_upload_disabled", map[string]string{
-			"status": strconv.Itoa(response.StatusCode),
-			"body":   truncateForLog(string(responseBody), 300),
+			"code":    code,
+			"message": truncateForLog(message, 300),
 		})
 		u.mu.Lock()
 		u.enabled = false
 		u.mu.Unlock()
-	default:
-		u.requeue(batch, false) // 5xx，稍后重试
+		return
 	}
+	u.requeue(batch, false)
 }
 
 // requeue 把没发出去的日志放回队列；discard 为 true 时直接丢弃。

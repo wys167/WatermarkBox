@@ -59,6 +59,11 @@ func initRuntime() {
 		root := filepath.Join(dir, "runtime")
 		if info, err := os.Stat(filepath.Join(root, "bin", magickBinaryName())); err == nil && !info.IsDir() {
 			runtimeRoot = relocateRuntime(root)
+			logEvent("info", "runtime_ready", map[string]string{
+				"platform":    runtime.GOOS + "/" + runtime.GOARCH,
+				"runtimeRoot": runtimeRoot,
+				"clsEnabled":  strconv.FormatBool(logger != nil && logger.uploader.enabled),
+			})
 			return
 		}
 	}
