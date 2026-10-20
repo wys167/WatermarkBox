@@ -58,7 +58,7 @@ func initRuntime() {
 		}
 		root := filepath.Join(dir, "runtime")
 		if info, err := os.Stat(filepath.Join(root, "bin", magickBinaryName())); err == nil && !info.IsDir() {
-			runtimeRoot = root
+			runtimeRoot = relocateRuntime(root)
 			return
 		}
 	}
@@ -642,7 +642,15 @@ func imageDimensions(ctx context.Context, path string) (int, int, error) {
 	cmd.Env = commandEnvironment()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, 0, errors.New(strings.TrimSpace(string(output)))
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		logEvent("error", "identify_failed", map[string]string{
+			"path":  truncateForLog(path, 300),
+			"error": truncateForLog(message, 500),
+		})
+		return 0, 0, errors.New(message)
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) != 2 {
