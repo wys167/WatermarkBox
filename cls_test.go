@@ -41,8 +41,8 @@ func TestEncodeLogGroupList(t *testing.T) {
 	}
 	encoded := encodeLogGroupList([]clsLog{log})
 
-	group := pbUnwrap(t, encoded, 0x0A)  // LogGroupList → LogGroup
-	entry := pbUnwrap(t, group, 0x0A)    // LogGroup → Log
+	group := pbUnwrap(t, encoded, 0x0A) // LogGroupList → LogGroup
+	entry := pbUnwrap(t, group, 0x0A)   // LogGroup → Log
 	if entry[0] != 0x08 || entry[1] != 0x01 {
 		t.Fatalf("Log.time 编码不符: % x", entry[:2])
 	}
