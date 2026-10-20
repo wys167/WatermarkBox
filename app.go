@@ -40,26 +40,32 @@ func init() {
 	initRuntime()
 }
 
-// initRuntime 探测随应用打包的 runtime 目录（macOS 在 .app/Contents/Resources/runtime，
-// Windows 在可执行文件旁的 runtime）。
+// initRuntime 探测 runtime 目录，优先级：
+// 1. 应用旁边的 runtime（便携目录模式）
+// 2. Windows 内嵌资源解压到 %LocalAppData% 的副本（单文件模式）
+// 3. macOS .app 内的 Resources/runtime
 func initRuntime() {
-	exe, err := os.Executable()
-	if err != nil {
-		return
+	if exe, err := os.Executable(); err == nil {
+		resolved, err := filepath.EvalSymlinks(exe)
+		if err == nil {
+			exe = resolved
+		}
+		dir := filepath.Dir(exe)
+		if runtime.GOOS == "darwin" {
+			dir = filepath.Join(dir, "..", "Resources")
+		}
+		root := filepath.Join(dir, "runtime")
+		if info, err := os.Stat(filepath.Join(root, "bin", magickBinaryName())); err == nil && !info.IsDir() {
+			runtimeRoot = root
+			return
+		}
 	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
+
+	if root := prepareEmbeddedRuntime(); root != "" {
+		if info, err := os.Stat(filepath.Join(root, "bin", magickBinaryName())); err == nil && !info.IsDir() {
+			runtimeRoot = root
+		}
 	}
-	dir := filepath.Dir(exe)
-	if runtime.GOOS == "darwin" {
-		dir = filepath.Join(dir, "..", "Resources")
-	}
-	root := filepath.Join(dir, "runtime")
-	info, err := os.Stat(filepath.Join(root, "bin", magickBinaryName()))
-	if err != nil || info.IsDir() {
-		return
-	}
-	runtimeRoot = root
 }
 
 func magickBinaryName() string {
@@ -336,11 +342,11 @@ func (a *App) OpenOutputDirectory() error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", outputDirectory)
+		cmd = newCmd(context.Background(), "open", outputDirectory)
 	case "windows":
-		cmd = exec.Command("explorer", outputDirectory)
+		cmd = newCmd(context.Background(), "explorer", outputDirectory)
 	default:
-		cmd = exec.Command("xdg-open", outputDirectory)
+		cmd = newCmd(context.Background(), "xdg-open", outputDirectory)
 	}
 	return cmd.Start()
 }
@@ -661,7 +667,7 @@ func renderPDFPageAtDensity(ctx context.Context, source string, page int, destin
 		return err
 	}
 	pageNumber := strconv.Itoa(page + 1)
-	cmd := exec.CommandContext(ctx, ghostscript,
+	cmd := newCmd(ctx, ghostscript,
 		"-q", "-dSAFER", "-dBATCH", "-dNOPAUSE",
 		"-sDEVICE=png16m", "-r"+strconv.Itoa(density),
 		"-dFirstPage="+pageNumber, "-dLastPage="+pageNumber,
@@ -872,12 +878,19 @@ func outputArguments(config Config) []string {
 	return args
 }
 
+// newCmd 创建外部命令，Windows 下隐藏控制台窗口，避免 GUI 应用闪黑框。
+func newCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	hideConsole(cmd)
+	return cmd
+}
+
 func runMagick(ctx context.Context, args ...string) error {
 	path, err := findMagick()
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, path, args...)
+	cmd := newCmd(ctx, path, args...)
 	cmd.Env = commandEnvironment()
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
@@ -986,17 +999,26 @@ func commandEnvironment() []string {
 			separator = ";"
 		}
 		environment = append(environment, "MAGICK_HOME="+runtimeRoot)
-		// coder/filter 以模块形式编译，需显式告知模块与配置路径，
-		// 否则在未安装 ImageMagick 的机器上会报 no decode delegate
-		environment = append(environment, "MAGICK_CODER_MODULE_PATH="+
-			filepath.Join(runtimeRoot, "lib", "ImageMagick", "modules-Q16HDRI", "coders"))
-		environment = append(environment, "MAGICK_FILTER_MODULE_PATH="+
-			filepath.Join(runtimeRoot, "lib", "ImageMagick", "modules-Q16HDRI", "filters"))
-		environment = append(environment, "MAGICK_CONFIGURE_PATH="+strings.Join([]string{
+		// macOS 版 ImageMagick 以模块形式编译 coder/filter，需显式告知路径；
+		// Windows 便携版为静态内置，目录不存在时不能设置（设了反而会屏蔽内置注册）
+		codersPath := filepath.Join(runtimeRoot, "lib", "ImageMagick", "modules-Q16HDRI", "coders")
+		filtersPath := filepath.Join(runtimeRoot, "lib", "ImageMagick", "modules-Q16HDRI", "filters")
+		if info, err := os.Stat(codersPath); err == nil && info.IsDir() {
+			environment = append(environment, "MAGICK_CODER_MODULE_PATH="+codersPath)
+		}
+		if info, err := os.Stat(filtersPath); err == nil && info.IsDir() {
+			environment = append(environment, "MAGICK_FILTER_MODULE_PATH="+filtersPath)
+		}
+		configPaths := []string{
 			filepath.Join(runtimeRoot, "lib", "ImageMagick", "config-Q16HDRI"),
 			filepath.Join(runtimeRoot, "etc", "ImageMagick-7"),
-		}, separator))
-		environment = append(environment, "GS_LIB="+gsLibraryPath())
+		}
+		if info, err := os.Stat(configPaths[0]); err == nil && info.IsDir() {
+			environment = append(environment, "MAGICK_CONFIGURE_PATH="+strings.Join(configPaths, separator))
+		}
+		if info, err := os.Stat(filepath.Join(runtimeRoot, "gs", "Resource", "Init")); err == nil && info.IsDir() {
+			environment = append(environment, "GS_LIB="+gsLibraryPath())
+		}
 	}
 	for index, item := range environment {
 		if strings.HasPrefix(item, "PATH=") {

@@ -3,3 +3,4 @@ node_modules
 frontend/dist
 WatermarkBox
 .DS_Store
+embedded-runtime/
