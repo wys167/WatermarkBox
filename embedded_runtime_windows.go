@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Windows 版把整个 runtime（magick/gs 及依赖）嵌进 exe，
@@ -33,6 +34,13 @@ func prepareEmbeddedRuntime() string {
 			return target
 		}
 	}
+
+	// 排他锁：防止双开时两个实例同时解压，互相删改对方文件。
+	unlock := acquireRuntimeLock(target, 10*time.Minute)
+	if unlock == nil {
+		return ""
+	}
+	defer unlock()
 
 	if err := os.RemoveAll(target); err != nil {
 		logEvent("error", "embedded_runtime_cleanup_failed", map[string]string{

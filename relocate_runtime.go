@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // macOS 的 ImageMagick 以模块形式构建，coders/*.la 文件内嵌构建机器的绝对路径，
@@ -41,6 +42,12 @@ func relocateRuntime(sourceRoot string) string {
 		"source": sourceRoot,
 		"target": target,
 	})
+	unlock := acquireRuntimeLock(target, 10*time.Minute)
+	if unlock == nil {
+		logEvent("error", "runtime_relocate_failed", map[string]string{"error": "另一个实例正在迁移 runtime"})
+		return sourceRoot
+	}
+	defer unlock()
 	if err := os.RemoveAll(target); err != nil {
 		logEvent("error", "runtime_relocate_failed", map[string]string{"error": err.Error()})
 		return sourceRoot
@@ -59,6 +66,30 @@ func relocateRuntime(sourceRoot string) string {
 	}
 	logEvent("info", "runtime_relocate_done", nil)
 	return target
+}
+
+// acquireRuntimeLock 用排他锁文件防止多个实例同时复制/解压 runtime
+// 互相删改对方文件。锁文件超过 staleAfter 视为残留（上次进程异常退出）直接接管。
+// 返回释放函数；获取失败（等待超时）返回 nil，调用方应放弃本次迁移。
+func acquireRuntimeLock(directory string, staleAfter time.Duration) func() {
+	_ = os.MkdirAll(filepath.Dir(directory), 0o755)
+	lockPath := filepath.Join(directory, ".runtime.lock")
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			_ = file.Close()
+			return func() { _ = os.Remove(lockPath) }
+		}
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > staleAfter {
+			_ = os.Remove(lockPath) // 接管残留锁
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 // runtimeStamp 用 magick 二进制的大小与修改时间作为内容指纹，

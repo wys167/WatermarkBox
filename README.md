@@ -67,6 +67,10 @@ macOS 首次打开若被 Gatekeeper 拦截（未公证签名），右键点应�
 - macOS：`~/Library/Caches/WatermarkBox/logs/app-YYYYMMDD.log`
 - Windows：`%LocalAppData%\WatermarkBox\logs\app-YYYYMMDD.log`
 
+macOS 首次启动会把 .app 内的 runtime 复制到 `~/Library/Caches/WatermarkBox/runtime`
+并就地修正 ImageMagick 模块路径（`.la` 内嵌构建机绝对路径，直接在包内运行会加载失败），
+应用更新后自动重新复制。
+
 记录的事件：启动与 runtime 初始化、magick/ghostscript 调用失败详情、
 每次批量处理的开始/结束统计、Windows 内嵌组件解压失败原因。
 

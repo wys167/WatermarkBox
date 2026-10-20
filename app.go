@@ -557,7 +557,7 @@ func pdfPageCount(path string) (int, error) {
 	escapedPath = strings.ReplaceAll(escapedPath, "(", "\\(")
 	escapedPath = strings.ReplaceAll(escapedPath, ")", "\\)")
 	command := fmt.Sprintf("(%s) (r) file runpdfbegin pdfpagecount = quit", escapedPath)
-	cmd := exec.Command(ghostscript, "-q", "-dNOSAFER", "-dNODISPLAY", "-c", command)
+	cmd := newCmd(context.Background(), ghostscript, "-q", "-dNOSAFER", "-dNODISPLAY", "-c", command)
 	cmd.Env = commandEnvironment()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -638,7 +638,7 @@ func imageDimensions(ctx context.Context, path string) (int, int, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	cmd := exec.CommandContext(ctx, magickPath, "identify", "-format", "%w %h", path)
+	cmd := newCmd(ctx, magickPath, "identify", "-format", "%w %h", path)
 	cmd.Env = commandEnvironment()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1001,7 +1001,9 @@ func validateConfig(config *Config) error {
 	if config.Mode != "tile" && config.Mode != "center" {
 		return errors.New("水印模式不正确")
 	}
-	if config.TileWidth < 20 || config.TileWidth > 3000 || config.TileHeight < 20 || config.TileHeight > 2000 {
+	// 平铺尺寸仅在平铺模式下参与处理，居中模式不校验，避免误报。
+	if config.Mode == "tile" &&
+		(config.TileWidth < 20 || config.TileWidth > 3000 || config.TileHeight < 20 || config.TileHeight > 2000) {
 		return errors.New("平铺尺寸超出允许范围")
 	}
 	if config.OutputFormat != "png" && config.OutputFormat != "jpg" && config.OutputFormat != "webp" {
@@ -1027,22 +1029,20 @@ func checkMagick() error {
 func commandEnvironment() []string {
 	environment := os.Environ()
 	pathValue := os.Getenv("PATH")
+	// PATH 分隔符平台相关（Windows 为分号），拼错会导致子进程 PATH 失效。
+	separator := string(os.PathListSeparator)
 	if runtimeRoot != "" {
 		runtimeBin := filepath.Join(runtimeRoot, "bin")
-		if !strings.Contains(":"+pathValue+":", ":"+runtimeBin+":") {
-			pathValue = runtimeBin + ":" + pathValue
+		if !strings.Contains(separator+pathValue+separator, separator+runtimeBin+separator) {
+			pathValue = runtimeBin + separator + pathValue
 		}
 	}
 	for _, directory := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"} {
-		if !strings.Contains(":"+pathValue+":", ":"+directory+":") {
-			pathValue = directory + ":" + pathValue
+		if !strings.Contains(separator+pathValue+separator, separator+directory+separator) {
+			pathValue = directory + separator + pathValue
 		}
 	}
 	if runtimeRoot != "" {
-		separator := ":"
-		if runtime.GOOS == "windows" {
-			separator = ";"
-		}
 		environment = append(environment, "MAGICK_HOME="+runtimeRoot)
 		// macOS 版 ImageMagick 以模块形式编译 coder/filter，需显式告知路径；
 		// Windows 便携版为静态内置，目录不存在时不能设置（设了反而会屏蔽内置注册）
@@ -1076,10 +1076,7 @@ func commandEnvironment() []string {
 
 // gsLibraryPath 返回内置 Ghostscript 的资源搜索路径（GS_LIB）。
 func gsLibraryPath() string {
-	separator := ":"
-	if runtime.GOOS == "windows" {
-		separator = ";"
-	}
+	separator := string(os.PathListSeparator)
 	parts := []string{
 		filepath.Join(runtimeRoot, "gs", "Resource", "Init"),
 		filepath.Join(runtimeRoot, "gs", "Resource", "Font"),
@@ -1167,6 +1164,9 @@ func defaultFontPath() string {
 		"/System/Library/Fonts/STHeiti Medium.ttc",
 		"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 		"C:\\Windows\\Fonts\\msyh.ttc",
+		"C:\\Windows\\Fonts\\msyhbd.ttc",
+		"C:\\Windows\\Fonts\\simhei.ttf",
+		"C:\\Windows\\Fonts\\simsun.ttc",
 		"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 	}
 	for _, path := range candidates {
