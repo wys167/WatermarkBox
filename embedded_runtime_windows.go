@@ -35,9 +35,15 @@ func prepareEmbeddedRuntime() string {
 	}
 
 	if err := os.RemoveAll(target); err != nil {
+		logEvent("error", "embedded_runtime_cleanup_failed", map[string]string{
+			"error": err.Error(),
+		})
 		return ""
 	}
 	if err := extractEmbedded(embeddedRuntime, "embedded-runtime", target); err != nil {
+		logEvent("error", "embedded_runtime_extract_failed", map[string]string{
+			"error": err.Error(),
+		})
 		return ""
 	}
 	if err := os.WriteFile(versionFile, []byte(embeddedRuntimeVersion), 0o644); err != nil {

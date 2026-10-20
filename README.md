@@ -59,3 +59,25 @@ Windows 侧的 runtime（静态版 magick.exe + gswin64c + VC 运行时）组装
 
 macOS 首次打开若被 Gatekeeper 拦截（未公证签名），右键点应用选"打开"即可。
 输出目录为 `~/Desktop/水印输出`。
+
+## 日志与云端上报
+
+应用把运行日志写到本地（保留 7 天）：
+
+- macOS：`~/Library/Caches/WatermarkBox/logs/app-YYYYMMDD.log`
+- Windows：`%LocalAppData%\WatermarkBox\logs\app-YYYYMMDD.log`
+
+记录的事件：启动与 runtime 初始化、magick/ghostscript 调用失败详情、
+每次批量处理的开始/结束统计、Windows 内嵌组件解压失败原因。
+
+默认**只写本地，不上传**。仅当运行机器上配置了以下环境变量时，
+日志才会批量（每 15 秒）上报到腾讯云 CLS；密钥缺失或错误时静默忽略：
+
+```bash
+export TENCENTCLOUD_SECRET_ID=AKIDxxxx          # 腾讯云子账号密钥
+export TENCENTCLOUD_SECRET_KEY=xxxx
+export WATERMARKBOX_CLS_TOPIC_ID=xxxx           # CLS 日志主题 ID
+export WATERMARKBOX_CLS_REGION=ap-shanghai      # CLS 地域
+```
+
+密钥不编译进程序，分发给普通用户的安装包天然不上传任何数据。

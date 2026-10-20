@@ -37,7 +37,9 @@ func defaultOutputDirectory() string {
 }
 
 func init() {
+	initLogger()
 	initRuntime()
+	go logger.uploader.loop()
 }
 
 // initRuntime 探测 runtime 目录，优先级：
@@ -66,6 +68,11 @@ func initRuntime() {
 			runtimeRoot = root
 		}
 	}
+	logEvent("info", "runtime_ready", map[string]string{
+		"platform":    runtime.GOOS + "/" + runtime.GOARCH,
+		"runtimeRoot": runtimeRoot,
+		"clsEnabled":  strconv.FormatBool(logger != nil && logger.uploader.enabled),
+	})
 }
 
 func magickBinaryName() string {
@@ -395,6 +402,19 @@ func (a *App) Process(paths []string, config Config) (ProcessResult, error) {
 	}
 
 	result := ProcessResult{Total: len(jobs), OutputDirectory: outputDirectory}
+	logEvent("info", "process_start", map[string]string{
+		"total":  strconv.Itoa(len(jobs)),
+		"mode":   config.Mode,
+		"format": config.OutputFormat,
+	})
+	defer func() {
+		logEvent("info", "process_done", map[string]string{
+			"total":     strconv.Itoa(result.Total),
+			"success":   strconv.Itoa(result.Success),
+			"failed":    strconv.Itoa(result.Failed),
+			"cancelled": strconv.FormatBool(result.Cancelled),
+		})
+	}()
 	for index, job := range jobs {
 		if ctx.Err() != nil {
 			result.Cancelled = true
@@ -683,6 +703,11 @@ func renderPDFPageAtDensity(ctx context.Context, source string, page int, destin
 		if message == "" {
 			message = err.Error()
 		}
+		logEvent("error", "ghostscript_failed", map[string]string{
+			"source": filepath.Base(source),
+			"page":   strconv.Itoa(page + 1),
+			"error":  truncateForLog(message, 500),
+		})
 		return errors.New(message)
 	}
 	return nil
@@ -901,9 +926,21 @@ func runMagick(ctx context.Context, args ...string) error {
 		if message == "" {
 			message = err.Error()
 		}
+		logEvent("error", "magick_failed", map[string]string{
+			"args":  truncateForLog(strings.Join(args, " "), 500),
+			"error": truncateForLog(message, 500),
+		})
 		return errors.New(message)
 	}
 	return nil
+}
+
+// truncateForLog 限制单条日志字段长度，避免超长命令行撑爆日志。
+func truncateForLog(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
 }
 
 func outputPathFor(job imageJob, format string) (string, error) {
