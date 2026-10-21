@@ -547,6 +547,11 @@ func jobsForFile(path, relativePath string) ([]imageJob, error) {
 	}
 	pageCount, err := pdfPageCount(path)
 	if err != nil {
+		// 收集阶段失败发生在 process_start 之前，不记日志就是盲区（曾导致弹窗报错但云端无线索）。
+		logEvent("error", "pdf_pagecount_failed", map[string]string{
+			"path":  truncateForLog(path, 300),
+			"error": truncateForLog(err.Error(), 300),
+		})
 		return nil, fmt.Errorf("读取PDF页数失败（%s）：%w", filepath.Base(path), err)
 	}
 	jobs := make([]imageJob, 0, pageCount)

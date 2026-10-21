@@ -17,7 +17,9 @@ import (
 var embeddedRuntime embed.FS
 
 // runtime 内容变化时递增此版本号，触发重新解压。
-const embeddedRuntimeVersion = "1"
+// v2：v1.0.2 及更早构建时 embedded-runtime 缺 gsdll64.dll 与部分 ImageMagick 配置，
+// 旧用户机器上的残缺 runtime 因版本号未变而永不更新，PDF 功能全坏。
+const embeddedRuntimeVersion = "2"
 
 // prepareEmbeddedRuntime 返回解压后的 runtime 目录；失败返回空字符串。
 func prepareEmbeddedRuntime() string {
@@ -30,8 +32,11 @@ func prepareEmbeddedRuntime() string {
 
 	if data, err := os.ReadFile(versionFile); err == nil &&
 		string(data) == embeddedRuntimeVersion {
+		// 除 magick 外再验 gs 启动器，防止 runtime 被杀毒/清理工具删掉部分文件后不自愈。
 		if _, err := os.Stat(filepath.Join(target, "bin", "magick.exe")); err == nil {
-			return target
+			if _, err := os.Stat(filepath.Join(target, "bin", ghostscriptBinaryName())); err == nil {
+				return target
+			}
 		}
 	}
 
