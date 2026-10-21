@@ -411,6 +411,14 @@ func (a *App) Process(paths []string, config Config) (ProcessResult, error) {
 		"total":  strconv.Itoa(len(jobs)),
 		"mode":   config.Mode,
 		"format": config.OutputFormat,
+		// 排查"水印不显示"类问题：把影响渲染的关键配置一并记录。
+		"font":     truncateForLog(config.FontPath, 120),
+		"fontSize": strconv.Itoa(config.FontSize),
+		"opacity":  strconv.FormatFloat(config.Opacity, 'f', 3, 64),
+		"angle":    strconv.FormatFloat(config.Angle, 'f', 1, 64),
+		"color":    config.Color,
+		"tileW":    strconv.Itoa(config.TileWidth),
+		"tileH":    strconv.Itoa(config.TileHeight),
 	})
 	defer func() {
 		logEvent("info", "process_done", map[string]string{
@@ -772,7 +780,11 @@ func processTiledImage(ctx context.Context, source, destination string, config C
 	if err := textFile.Close(); err != nil {
 		return err
 	}
-	defer os.Remove(textPath)
+	defer func() {
+		if !keepTempFiles {
+			os.Remove(textPath)
+		}
+	}()
 
 	// 先测量单个完整水印内容，用它计算整行需要重复多少份。
 	args := []string{"-background", "none"}
@@ -785,6 +797,9 @@ func processTiledImage(ctx context.Context, source, destination string, config C
 	if err != nil {
 		return fmt.Errorf("读取水印文字尺寸失败：%w", err)
 	}
+	if tiledDebugf != nil {
+		tiledDebugf("text miff=%s 尺寸=%dx%d", textPath, textWidth, textHeight)
+	}
 
 	rowFile, err := os.CreateTemp("", "watermark-box-row-*.miff")
 	if err != nil {
@@ -794,7 +809,11 @@ func processTiledImage(ctx context.Context, source, destination string, config C
 	if err := rowFile.Close(); err != nil {
 		return err
 	}
-	defer os.Remove(rowPath)
+	defer func() {
+		if !keepTempFiles {
+			os.Remove(rowPath)
+		}
+	}()
 
 	// 一行 = 多个完整水印内容水平拼接（间隔为TileWidth），先拼好整行再统一旋转，
 	// 这样倾斜以整行为单位，同行文字共用同一条斜向基线，而不是各自单独旋转。
@@ -818,10 +837,22 @@ func processTiledImage(ctx context.Context, source, destination string, config C
 	if err != nil {
 		return fmt.Errorf("读取整行水印尺寸失败：%w", err)
 	}
+	if tiledDebugf != nil {
+		tiledDebugf("row miff=%s 尺寸=%dx%d repeat=%d", rowPath, rowWidth, rowHeight,
+			rowRepeatCount(width, height, textWidth, textHeight, config))
+	}
 
 	// 把整行沿垂直于行方向逐行铺满原图，行距由TileHeight控制。
 	args = []string{source}
-	for _, offset := range rowOffsets(width, height, rowWidth, rowHeight, textWidth, textHeight, config) {
+	offsets := rowOffsets(width, height, rowWidth, rowHeight, textWidth, textHeight, config)
+	if tiledDebugf != nil {
+		descriptions := make([]string, 0, len(offsets))
+		for _, offset := range offsets {
+			descriptions = append(descriptions, fmt.Sprintf("(%d,%d)", offset.X, offset.Y))
+		}
+		tiledDebugf("画布=%dx%d 落点=%s", width, height, strings.Join(descriptions, " "))
+	}
+	for _, offset := range offsets {
 		args = append(args, rowPath, "-geometry", fmt.Sprintf("+%d+%d", offset.X, offset.Y), "-compose", "over", "-composite")
 	}
 	args = append(args, outputArguments(config)...)
@@ -899,10 +930,17 @@ func textArguments(config Config) []string {
 	r, g, b := parseHexColor(config.Color)
 	alpha := strconv.FormatFloat(config.Opacity, 'f', 3, 64)
 	return []string{
-		"-font", config.FontPath,
+		"-font", magickFontPath(config.FontPath),
 		"-pointsize", strconv.Itoa(config.FontSize),
 		"-fill", fmt.Sprintf("rgba(%d,%d,%d,%s)", r, g, b, alpha),
 	}
+}
+
+// magickFontPath 把 Windows 路径分隔符换成正斜杠：IM 7.1.2-34 的 Windows 静态版
+// 会把 -font 值里的反斜杠当转义符吞掉，字体加载失败只发 warning 并静默回退到
+// 不含 CJK 字形的默认字体，中文水印因此整体透明（v1.0.2 Windows 无水印的根因）。
+func magickFontPath(path string) string {
+	return strings.ReplaceAll(path, "\\", "/")
 }
 
 func outputArguments(config Config) []string {
@@ -923,13 +961,33 @@ func newCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// selftest 诊断开关：B=继承进程默认环境，C=纯 exec（可见控制台）。
+var (
+	magickInheritEnv bool
+	magickPlainExec  bool
+	// magickArgLogLimit 控制 magick_args 日志截断长度，selftest 时调大以拿到完整 argv。
+	magickArgLogLimit = 500
+	// tiledDebugf 存在时，processTiledImage 把中间尺寸与落点吐给它。
+	tiledDebugf func(format string, args ...interface{})
+	// keepTempFiles 为 true 时不删除平铺管线的中间 miff 文件。
+	keepTempFiles bool
+)
+
 func runMagick(ctx context.Context, args ...string) error {
 	path, err := findMagick()
 	if err != nil {
 		return err
 	}
 	cmd := newCmd(ctx, path, args...)
-	cmd.Env = commandEnvironment()
+	switch {
+	case magickPlainExec:
+		cmd = exec.CommandContext(ctx, path, args...) // 可见控制台 + 继承默认环境
+		cmd.Env = nil
+	case magickInheritEnv:
+		cmd.Env = nil // 隐藏控制台，但继承默认环境（无 MAGICK 变量）
+	default:
+		cmd.Env = commandEnvironment()
+	}
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return errors.New("处理已取消")
@@ -944,6 +1002,17 @@ func runMagick(ctx context.Context, args ...string) error {
 			"error": truncateForLog(message, 500),
 		})
 		return errors.New(message)
+	}
+	// debug 级别记录每次 magick 的完整参数，用于排查"命令成功但输出不对"类问题。
+	logEvent("debug", "magick_args", map[string]string{
+		"argv": truncateForLog(fmt.Sprintf("%q", args), magickArgLogLimit),
+	})
+	// magick 退出码为 0 时仍可能输出 warning（如字体加载失败回退默认字体），
+	// 这类警告正是"命令成功但输出不对"的常见根源，不能吞掉。
+	if message := strings.TrimSpace(string(output)); message != "" {
+		logEvent("warn", "magick_output", map[string]string{
+			"output": truncateForLog(message, 500),
+		})
 	}
 	return nil
 }

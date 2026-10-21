@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -13,6 +14,12 @@ import (
 var assets embed.FS
 
 func main() {
+	// selftest 模式：不启动 GUI，用三种进程上下文各跑一遍平铺管线，排查环境差异。
+	if len(os.Args) > 1 && os.Args[1] == "selftest" {
+		runSelfTest(os.Args[2:])
+		return
+	}
+
 	app := NewApp()
 
 	err := wails.Run(&options.App{
